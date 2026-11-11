@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Учёт рабочего времени</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; color: #1b2430; }
+  h1 { font-size: 22px; } h2 { font-size: 16px; margin-top: 28px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+  input, select, button { font-size: 15px; padding: 8px 10px; border: 1px solid #b8c0cc; border-radius: 6px; }
+  input[type=text] { flex: 1; min-width: 160px; }
+  button { background: #1e2761; color: #fff; border: none; cursor: pointer; }
+  button.stop { background: #b3261e; }
+  #msg { min-height: 20px; color: #b3261e; margin: 8px 0; } #msg.ok { color: #1b6e3c; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e3e7ee; font-size: 14px; }
+  .total { margin-top: 10px; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Учёт рабочего времени</h1>
+<div id="msg"></div>
+
+<h2>Сотрудники</h2>
+<div class="row">
+  <input type="text" id="new-name" placeholder="Имя нового сотрудника">
+  <button onclick="addEmployee()">Добавить</button>
+</div>
+<div class="row"><select id="emp" onchange="refresh()"></select></div>
+
+<h2>Таймер</h2>
+<div id="running" style="margin:6px 0"></div>
+<div class="row">
+  <input type="text" id="task" placeholder="Описание задачи">
+  <button onclick="startTimer()">Старт</button>
+  <button class="stop" onclick="stopTimer()">Стоп</button>
+</div>
+
+<h2>Отчёт за период</h2>
+<div class="row">
+  <label>с <input type="date" id="from"></label>
+  <label>по <input type="date" id="to"></label>
+  <button onclick="loadReport()">Показать</button>
+</div>
+<div id="report"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+function say(text, ok) { $("msg").textContent = text || ""; $("msg").className = ok ? "ok" : ""; }
+function fmt(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return h + ":" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+async function api(path, method, body) {
+  const r = await fetch(path, { method: method || "GET",
+    headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const d = data.detail;
+    throw new Error(Array.isArray(d) ? d.map(x => x.msg.replace(/^Value error, /, "")).join("; ") : (d || "Ошибка " + r.status));
+  }
+  return data;
+}
+async function loadEmployees(keepId) {
+  const list = await api("/api/employees");
+  $("emp").innerHTML = "";
+  list.forEach(e => {
+    const o = document.createElement("option");
+    o.value = e.id; o.textContent = e.name + (e.running_task ? " ⏱" : ""); o.dataset.running = e.running_task || "";
+    $("emp").appendChild(o);
+  });
+  if (keepId) $("emp").value = keepId;
+}
+function showRunning() {
+  const o = $("emp").selectedOptions[0];
+  $("running").textContent = o && o.dataset.running ? "Идёт задача: " + o.dataset.running : "Таймер не запущен";
+}
+async function refresh() { showRunning(); await loadReport(); }
+async function addEmployee() {
+  try {
+    const e = await api("/api/employees", "POST", { name: $("new-name").value });
+    $("new-name").value = ""; await loadEmployees(e.id); say("Сотрудник добавлен", true); await refresh();
+  } catch (e) { say(e.message); }
+}
+async function startTimer() {
+  try {
+    const id = $("emp").value; if (!id) throw new Error("Сначала добавьте сотрудника");
+    await api("/api/timer/start", "POST", { employee_id: +id, task: $("task").value });
+    $("task").value = ""; await loadEmployees(id); say("Таймер запущен", true); await refresh();
+  } catch (e) { say(e.message); }
+}
+async function stopTimer() {
+  try {
+    const id = $("emp").value; if (!id) throw new Error("Сначала добавьте сотрудника");
+    const r = await api("/api/timer/stop", "POST", { employee_id: +id });
+    await loadEmployees(id); say("Остановлено: " + fmt(r.seconds), true); await refresh();
+  } catch (e) { say(e.message); }
+}
+async function loadReport() {
+  const id = $("emp").value; const box = $("report");
+  if (!id) { box.textContent = ""; return; }
+  const q = new URLSearchParams({ employee_id: id });
+  if ($("from").value) q.set("date_from", $("from").value);
+  if ($("to").value) q.set("date_to", $("to").value);
+  try {
+    const r = await api("/api/report?" + q);
+    if (!r.entries.length) { box.textContent = "За этот период записей нет. Итого: 0:00:00"; return; }
+    const t = document.createElement("table");
+    t.innerHTML = "<tr><th>Начало</th><th>Задача</th><th>Время</th></tr>";
+    r.entries.forEach(e => {
+      const tr = t.insertRow();
+      tr.insertCell().textContent = e.tr.insertCell().textContent = new Date(e.started_at).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });("T", " ").slice(0, 16);
+      tr.insertCell().textContent = e.task;
+      tr.insertCell().textContent = fmt(e.seconds) + (e.running ? " (идёт)" : "");
+    });
+    const tot = document.createElement("div"); tot.className = "total"; tot.textContent = "Итого: " + fmt(r.total_seconds);
+    box.innerHTML = ""; box.append(t, tot);
+  } catch (e) { say(e.message); }
+}
+loadEmployees().then(refresh);
+</script>
+</body>
+</html>
